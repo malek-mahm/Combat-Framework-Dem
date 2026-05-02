@@ -1,5 +1,4 @@
 --// =========================================================
---// COMBAT FRAMEWORK - EXPANDED SUBMISSION VERSION
 --// PURPOSE:
 --// Demonstrates advanced Luau systems:
 --// OOP, combat validation, physics, state machine,
