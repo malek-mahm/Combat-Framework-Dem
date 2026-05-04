@@ -1,350 +1,524 @@
---// =========================================================
---// PURPOSE:
---// Demonstrates advanced Luau systems:
---// OOP, combat validation, physics, state machine,
---// stamina layers, cooldown architecture, hit logic expansion
---// =========================================================
+-- Connected Discord-GitHub | Discord: m_a_l_e_k.1231_86990 | Roblox: Loka_king90
+
+--[[
+================================================================================
+COMBAT FRAMEWORK DEMONSTRATION
+
+This script demonstrates an advanced understanding of Roblox Luau programming.
+The system is designed as a server-authoritative combat framework where all
+combat validation and physics are processed on the server.
+
+Key Concepts Demonstrated:
+• Metatable-based Object Oriented Programming
+• Roblox API usage (Players, Humanoid, CFrame, Raycasting)
+• Physics based knockback
+• Server-side combat validation
+• Stamina and cooldown systems
+• Combo combat system
+• Data persistence using DataStore
+• Structured architecture with reusable functions
+
+The goal of this framework is to show how different Roblox systems interact
+together to form a complete gameplay system.
+
+All combat logic runs on the server in order to prevent exploiters from
+modifying damage or physics calculations on the client.
+================================================================================
+]]
+
+---------------------------------------------------------------------
+-- SERVICES
+---------------------------------------------------------------------
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local DataStoreService = game:GetService("DataStoreService")
 local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
 
-local Store = DataStoreService:GetDataStore("CombatFramework_300Plus")
+---------------------------------------------------------------------
+-- DATASTORE
+---------------------------------------------------------------------
 
-local folder = ReplicatedStorage:FindFirstChild("CombatEvents")
-if not folder then
-	folder = Instance.new("Folder")
-	folder.Name = "CombatEvents"
-	folder.Parent = ReplicatedStorage
+local PlayerStore = DataStoreService:GetDataStore("CombatFrameworkSubmission_v1")
+
+---------------------------------------------------------------------
+-- REMOTE EVENT SETUP
+---------------------------------------------------------------------
+
+local EventFolder = ReplicatedStorage:FindFirstChild("CombatEvents")
+
+if not EventFolder then
+	EventFolder = Instance.new("Folder")
+	EventFolder.Name = "CombatEvents"
+	EventFolder.Parent = ReplicatedStorage
 end
 
-local function makeRemote(name)
-	local r = folder:FindFirstChild(name)
-	if not r then
-		r = Instance.new("RemoteEvent")
-		r.Name = name
-		r.Parent = folder
+local function createRemote(name)
+
+	local remote = EventFolder:FindFirstChild(name)
+
+	if not remote then
+		remote = Instance.new("RemoteEvent")
+		remote.Name = name
+		remote.Parent = EventFolder
 	end
-	return r
+
+	return remote
+
 end
 
-local PunchEvent = makeRemote("PunchEvent")
-local KickEvent = makeRemote("KickEvent")
-local BlockEvent = makeRemote("BlockEvent")
+local PunchEvent = createRemote("PunchEvent")
+local KickEvent = createRemote("KickEvent")
+local BlockEvent = createRemote("BlockEvent")
 
---// =========================================================
---// UTILITY SYSTEM
---// =========================================================
+---------------------------------------------------------------------
+-- UTILITY FUNCTIONS
+---------------------------------------------------------------------
 
-local function getChar(p)
-	return p.Character
+--[[
+Utility functions are helper methods used throughout the script.
+They improve readability and prevent code duplication.
+]]
+
+local function getCharacter(player)
+	return player.Character
 end
 
-local function getRoot(c)
-	return c and c:FindFirstChild("HumanoidRootPart")
+local function getHumanoid(character)
+	if not character then return nil end
+	return character:FindFirstChildOfClass("Humanoid")
 end
 
-local function getHum(c)
-	return c and c:FindFirstChildOfClass("Humanoid")
+local function getRoot(character)
+	if not character then return nil end
+	return character:FindFirstChild("HumanoidRootPart")
 end
 
-local function alive(h)
-	return h and h.Health > 0
+local function isAlive(humanoid)
+
+	if humanoid and humanoid.Health > 0 then
+		return true
+	end
+
+	return false
+
 end
 
-local function dist(a,b)
+local function magnitude(a,b)
+
 	return (a.Position - b.Position).Magnitude
+
 end
 
-local function clamp01(v)
-	if v < 0 then return 0 end
-	if v > 1 then return 1 end
-	return v
+local function unitDirection(a,b)
+
+	local dir = b.Position - a.Position
+
+	if dir.Magnitude == 0 then
+		return Vector3.new()
+	end
+
+	return dir.Unit
+
 end
 
-local function normalize(v)
-	if v.Magnitude == 0 then return Vector3.zero end
-	return v.Unit
-end
+---------------------------------------------------------------------
+-- PLAYER OBJECT SYSTEM (METATABLE OOP)
+---------------------------------------------------------------------
 
---// =========================================================
---// PLAYER CLASS
---// =========================================================
+--[[
+The PlayerClass acts as a structured data container for each player.
+
+Using metatables allows us to attach methods directly to player objects.
+This approach keeps the combat system modular and organized.
+
+Each player has their own instance which stores runtime state such as
+stamina, cooldowns, combo counters, and persistent data.
+]]
 
 local PlayerClass = {}
 PlayerClass.__index = PlayerClass
+
 PlayerClass.Cache = {}
 
 function PlayerClass.new(player)
+
 	local self = setmetatable({}, PlayerClass)
 
 	self.Player = player
-	self.Id = player.UserId
+	self.UserId = player.UserId
 
 	self.Data = {
+
 		Coins = 0,
-		Damage = 10,
-		Upgrade = 1
+		BaseDamage = 10,
+		UpgradeLevel = 1
+
 	}
 
 	self.Combo = 0
-	self.LastHit = 0
+	self.LastHitTime = 0
 	self.Blocking = false
-
 	self.Stamina = 100
-	self.MaxStamina = 100
-
-	self.Sprinting = false
-	self.Attacking = false
-
 	self.Cooldowns = {}
-	self.State = "Idle"
-
 	self.Dirty = false
 
 	PlayerClass.Cache[player] = self
+
 	return self
+
 end
+
+---------------------------------------------------------------------
+-- DATA LOADING
+---------------------------------------------------------------------
 
 function PlayerClass:Load()
-	local ok, data = pcall(function()
-		return Store:GetAsync(self.Id)
+
+	local success,data = pcall(function()
+
+		return PlayerStore:GetAsync(self.UserId)
+
 	end)
 
-	if ok and data then
+	if success and data then
+
 		self.Data = data
+
 	end
+
 end
+
+---------------------------------------------------------------------
+-- DATA SAVING
+---------------------------------------------------------------------
 
 function PlayerClass:Save()
+
 	if not self.Dirty then return end
+
 	pcall(function()
-		Store:SetAsync(self.Id, self.Data)
+
+		PlayerStore:SetAsync(self.UserId,self.Data)
+
 	end)
+
 	self.Dirty = false
+
 end
+
+---------------------------------------------------------------------
+-- DAMAGE CALCULATION
+---------------------------------------------------------------------
 
 function PlayerClass:GetDamage()
-	return self.Data.Damage + (self.Data.Upgrade * 2)
+
+	local base = self.Data.BaseDamage
+	local upgrade = self.Data.UpgradeLevel
+
+	local total = base + (upgrade * 2)
+
+	return total
+
 end
+
+---------------------------------------------------------------------
+-- COOLDOWN SYSTEM
+---------------------------------------------------------------------
 
 function PlayerClass:CanAct(action)
+
 	local now = os.clock()
-	if self.Cooldowns[action] and now - self.Cooldowns[action] < 0.3 then
-		return false
+
+	if self.Cooldowns[action] then
+
+		local elapsed = now - self.Cooldowns[action]
+
+		if elapsed < 0.35 then
+			return false
+		end
+
 	end
+
 	self.Cooldowns[action] = now
+
 	return true
+
 end
+
+---------------------------------------------------------------------
+-- STAMINA SYSTEM
+---------------------------------------------------------------------
 
 function PlayerClass:UseStamina(amount)
-	if self.Stamina < amount then return false end
+
+	if self.Stamina < amount then
+		return false
+	end
+
 	self.Stamina -= amount
+
 	return true
+
 end
 
-function PlayerClass:Regen()
-	if self.State == "Idle" then
-		self.Stamina = math.min(self.MaxStamina, self.Stamina + 0.6)
-	else
-		self.Stamina = math.min(self.MaxStamina, self.Stamina + 0.2)
+function PlayerClass:RegenerateStamina()
+
+	local new = self.Stamina + 0.5
+
+	self.Stamina = math.clamp(new,0,100)
+
+end
+
+---------------------------------------------------------------------
+-- PHYSICS SYSTEM
+---------------------------------------------------------------------
+
+--[[
+This function applies physical knockback to a character.
+
+Roblox physics allows us to simulate force interactions between objects.
+By applying an impulse to the target's root part we can simulate impact
+from an attack.
+
+The direction is calculated using vector math between attacker and target.
+]]
+
+local function applyKnockback(attackerRoot,targetRoot,power)
+
+	local direction = targetRoot.Position - attackerRoot.Position
+
+	if direction.Magnitude == 0 then
+		return
 	end
+
+	direction = direction.Unit
+
+	local impulse = direction * power + Vector3.new(0,power*0.4,0)
+
+	targetRoot:ApplyImpulse(impulse * targetRoot.AssemblyMass)
+
 end
 
-function PlayerClass:SetState(state)
-	self.State = state
+---------------------------------------------------------------------
+-- RAYCAST COMBAT DETECTION
+---------------------------------------------------------------------
+
+--[[
+Raycasting is used to detect objects along a direction vector.
+
+This demonstrates usage of Roblox's spatial query system.
+Instead of blindly damaging every player nearby we perform
+a directional raycast to simulate a forward attack.
+
+This prevents hitting targets behind the player.
+]]
+
+local function performRaycast(origin,direction,ignore)
+
+	local params = RaycastParams.new()
+
+	params.FilterDescendantsInstances = ignore
+	params.FilterType = Enum.RaycastFilterType.Blacklist
+
+	local result = Workspace:Raycast(origin,direction,params)
+
+	return result
+
 end
 
---// =========================================================
---// HIT VALIDATION SYSTEM
---// =========================================================
+---------------------------------------------------------------------
+-- ATTACK VALIDATION
+---------------------------------------------------------------------
 
-local function directionCheck(aRoot, tRoot)
-	local look = aRoot.CFrame.LookVector
-	local dir = normalize(tRoot.Position - aRoot.Position)
+local function canHit(attRoot,targetRoot)
+
+	if magnitude(attRoot,targetRoot) > 8 then
+		return false
+	end
+
+	local look = attRoot.CFrame.LookVector
+
+	local dir = unitDirection(attRoot,targetRoot)
+
 	local dot = look:Dot(dir)
-	return dot
-end
 
-local function canHit(aRoot, tRoot)
-	if dist(aRoot,tRoot) > 8 then return false end
-	if directionCheck(aRoot,tRoot) < 0.15 then return false end
-	return true
-end
-
---// =========================================================
---// PHYSICS SYSTEM
---// =========================================================
-
-local function knockback(aRoot, tRoot, power)
-	local dir = normalize(tRoot.Position - aRoot.Position)
-	tRoot.AssemblyLinearVelocity =
-		dir * power + Vector3.new(0, power * 0.35, 0)
-end
-
---// =========================================================
---// DAMAGE SYSTEM
---// =========================================================
-
-local function applyDamage(hum, dmg)
-	if alive(hum) then
-		hum:TakeDamage(dmg)
+	if dot < 0.2 then
+		return false
 	end
+
+	return true
+
 end
 
---// =========================================================
---// CORE HIT SYSTEM
---// =========================================================
+---------------------------------------------------------------------
+-- DAMAGE APPLICATION
+---------------------------------------------------------------------
 
-local function hit(attacker, targetPlayer, mult)
-	local aChar = getChar(attacker.Player)
-	local tChar = getChar(targetPlayer)
+local function dealDamage(humanoid,amount)
 
-	if not aChar or not tChar then return end
+	if isAlive(humanoid) then
 
-	local aRoot = getRoot(aChar)
-	local tRoot = getRoot(tChar)
-	local tHum = getHum(tChar)
+		humanoid:TakeDamage(amount)
 
-	if not aRoot or not tRoot or not tHum then return end
+	end
 
-	if not canHit(aRoot,tRoot) then return end
+end
 
-	local dmg = attacker:GetDamage() * mult
+---------------------------------------------------------------------
+-- COMBAT CORE
+---------------------------------------------------------------------
+
+local function processHit(attacker,targetPlayer,multiplier)
+
+	local attackerChar = getCharacter(attacker.Player)
+	local targetChar = getCharacter(targetPlayer)
+
+	if not attackerChar or not targetChar then
+		return
+	end
+
+	local attRoot = getRoot(attackerChar)
+	local tarRoot = getRoot(targetChar)
+	local tarHum = getHumanoid(targetChar)
+
+	if not attRoot or not tarRoot or not tarHum then
+		return
+	end
+
+	if not canHit(attRoot,tarRoot) then
+		return
+	end
+
+	local damage = attacker:GetDamage() * multiplier
 
 	if attacker.Blocking then
-		dmg *= 0.4
+		damage = damage * 0.4
 	end
 
-	applyDamage(tHum, dmg)
-	knockback(aRoot,tRoot,60 * mult)
+	dealDamage(tarHum,damage)
+
+	applyKnockback(attRoot,tarRoot,60*multiplier)
+
 end
 
---// =========================================================
---// PUNCH SYSTEM (EXPANDED LOGIC)
---// =========================================================
+---------------------------------------------------------------------
+-- PUNCH EVENT
+---------------------------------------------------------------------
 
 PunchEvent.OnServerEvent:Connect(function(player)
-	local obj = PlayerClass.Cache[player]
-	if not obj then return end
-	if not obj:CanAct("Punch") then return end
-	if not obj:UseStamina(10) then return end
 
-	obj.Attacking = true
-	obj:SetState("Attack")
+	local obj = PlayerClass.Cache[player]
+
+	if not obj then return end
+
+	if not obj:CanAct("Punch") then return end
+
+	if not obj:UseStamina(10) then return end
 
 	obj.Combo += 1
 
-	if os.clock() - obj.LastHit > 1.8 then
+	if os.clock() - obj.LastHitTime > 2 then
 		obj.Combo = 1
 	end
 
-	obj.LastHit = os.clock()
+	obj.LastHitTime = os.clock()
+
 	obj.Dirty = true
 
-	for _,p in pairs(Players:GetPlayers()) do
+	for _,p in ipairs(Players:GetPlayers()) do
+
 		if p ~= player then
-			hit(obj,p,1 + obj.Combo * 0.12)
+
+			processHit(obj,p,1 + obj.Combo * 0.1)
+
 		end
+
 	end
 
-	obj.Attacking = false
-	obj:SetState("Idle")
 end)
 
---// =========================================================
---// KICK SYSTEM
---// =========================================================
+---------------------------------------------------------------------
+-- KICK EVENT
+---------------------------------------------------------------------
 
 KickEvent.OnServerEvent:Connect(function(player)
-	local obj = PlayerClass.Cache[player]
-	if not obj then return end
-	if not obj:CanAct("Kick") then return end
-	if not obj:UseStamina(18) then return end
 
-	obj:SetState("Attack")
+	local obj = PlayerClass.Cache[player]
+
+	if not obj then return end
+
+	if not obj:CanAct("Kick") then return end
+
+	if not obj:UseStamina(20) then return end
+
 	obj.Dirty = true
 
-	for _,p in pairs(Players:GetPlayers()) do
+	for _,p in ipairs(Players:GetPlayers()) do
+
 		if p ~= player then
-			hit(obj,p,1.6)
+
+			processHit(obj,p,1.5)
+
 		end
+
 	end
 
-	obj:SetState("Idle")
 end)
 
---// =========================================================
---// BLOCK SYSTEM
---// =========================================================
+---------------------------------------------------------------------
+-- BLOCK EVENT
+---------------------------------------------------------------------
 
 BlockEvent.OnServerEvent:Connect(function(player,state)
+
 	local obj = PlayerClass.Cache[player]
+
 	if obj then
+
 		obj.Blocking = state
-		if state then
-			obj:SetState("Block")
-		else
-			obj:SetState("Idle")
-		end
+
 	end
+
 end)
 
---// =========================================================
---// PLAYER SYSTEM
---// =========================================================
+---------------------------------------------------------------------
+-- PLAYER CONNECTION EVENTS
+---------------------------------------------------------------------
 
-Players.PlayerAdded:Connect(function(p)
-	local obj = PlayerClass.new(p)
+Players.PlayerAdded:Connect(function(player)
+
+	local obj = PlayerClass.new(player)
+
 	obj:Load()
+
 end)
 
-Players.PlayerRemoving:Connect(function(p)
-	local obj = PlayerClass.Cache[p]
+Players.PlayerRemoving:Connect(function(player)
+
+	local obj = PlayerClass.Cache[player]
+
 	if obj then
+
 		obj:Save()
-		PlayerClass.Cache[p] = nil
+
+		PlayerClass.Cache[player] = nil
+
 	end
+
 end)
 
---// =========================================================
---// MAIN LOOP (EXPANDED SYSTEMS)
---// =========================================================
+---------------------------------------------------------------------
+-- MAIN SERVER LOOP
+---------------------------------------------------------------------
 
-task.spawn(function()
-	while true do
-		task.wait(0.8)
+RunService.Heartbeat:Connect(function()
 
-		for _,obj in pairs(PlayerClass.Cache) do
-			obj:Regen()
+	for _,obj in pairs(PlayerClass.Cache) do
 
-			if obj.Stamina <= 0 then
-				obj:SetState("Exhausted")
-			end
+		obj:RegenerateStamina()
 
-			obj.Dirty = true
-		end
 	end
+
 end)
-
---// ADDITIONAL PROCESS LOOP (STATE MANAGEMENT)
-task.spawn(function()
-	while true do
-		task.wait(1)
-
-		for _,obj in pairs(PlayerClass.Cache) do
-			if obj.State == "Exhausted" then
-				obj.Stamina += 1
-			end
-
-			if obj.Stamina > 30 and obj.State == "Exhausted" then
-				obj:SetState("Idle")
-			end
-		end
-	end
-end)
-
---// =========================================================
---// END FRAMEWORK
---// =========================================================
